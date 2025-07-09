@@ -1,0 +1,94 @@
+import sys
+from datetime import datetime
+from pyspark.context import SparkContext
+from pyspark.sql.functions import col, to_date
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
+
+# ------------------------
+# Job Setup
+# ------------------------
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Spark optimizations
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+
+# ------------------------
+# Define Input/Output Paths
+# ------------------------
+input_path = "s3://pip-assign/input/"
+output_path = "s3://pip-assign/bronze/ecommerce/"
+
+# Get current date for output folder structure
+run_date = datetime.today()
+year = run_date.strftime('%Y')
+month = run_date.strftime('%m')
+day = run_date.strftime('%d')
+
+# ------------------------
+# Define Schemas
+# ------------------------
+schemas = {
+    "Sales_record": StructType([
+        StructField("sale_id", IntegerType()),
+        StructField("user_id", IntegerType()),
+        StructField("product_id", IntegerType()),
+        StructField("quantity", IntegerType()),
+        StructField("sale_date", StringType())
+    ]),
+    "products": StructType([
+        StructField("product_id", IntegerType()),
+        StructField("product_name", StringType()),
+        StructField("category", StringType()),
+        StructField("price", DoubleType())
+    ]),
+    "users": StructType([
+        StructField("user_id", IntegerType()),
+        StructField("first_name", StringType()),
+        StructField("last_name", StringType()),
+        StructField("email", StringType()),
+        StructField("country", StringType())
+    ])
+}
+
+# ------------------------
+# Reusable Function to Read CSV and Write Parquet
+# ------------------------
+def csv_to_parquet(file_name, schema, date_column=None, date_format_str="yyyy-MM-dd"):
+    try:
+        # Read the CSV
+        df = spark.read.option("header", "true").schema(schema).csv(f"{input_path}{file_name}.csv")
+        
+        # If a date column is specified, convert it
+        if date_column and date_column in df.columns:
+            df = df.withColumn(date_column, to_date(col(date_column), date_format_str))
+        
+        # Define output path
+        output_dir = f"{output_path}{file_name.lower()}/{year}/{month}/{day}/"
+        
+        # Write to Parquet
+        df.write.mode("overwrite").parquet(output_dir)
+        print(f"[OK] Written: {file_name}.csv ➜ {output_dir}")
+    except Exception as e:
+        print(f"[ERROR] Failed to process {file_name}: {e}")
+
+# ------------------------
+# Process All Files
+# ------------------------
+csv_to_parquet("Sales_record", schemas["Sales_record"], date_column="sale_date", date_format_str="yyyy-MM-dd")
+csv_to_parquet("products", schemas["products"])
+csv_to_parquet("users", schemas["users"])
+
+# ------------------------
+# Commit Glue Job
+# ------------------------
+job.commit()
+print("Glue job completed successfully.")
